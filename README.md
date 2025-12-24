@@ -37,7 +37,7 @@ ZipRaider is available in two implementations so you can choose based on your ne
 * Easy to read, customize, and extend
 * Great for learners and scripting workflows
 
-➡️ **Python folder:** [zipraider_py](https://github.com/giriaryan694-a11y/zipraider/tree/main/zipraider_py) :contentReference[oaicite:9]{index=9}
+➡️ **Python folder:** [zipraider_py](https://github.com/giriaryan694-a11y/zipraider/tree/main/zipraider_py) 
 
 ---
 
@@ -47,7 +47,7 @@ ZipRaider is available in two implementations so you can choose based on your ne
 * Lower-level control and faster execution
 * Best suited for tight time constraints and large wordlists
 
-➡️ **C folder:** [zipraider_c](https://github.com/giriaryan694-a11y/zipraider/tree/main/zipraider_c) :contentReference[oaicite:11]{index=11}
+➡️ **C folder:** [zipraider_c](https://github.com/giriaryan694-a11y/zipraider/tree/main/zipraider_c) 
 
 ---
 
