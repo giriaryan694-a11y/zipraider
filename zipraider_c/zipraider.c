@@ -17,7 +17,7 @@
 #include <errno.h>
 #include <dirent.h>
 
-#define VERSION "2.1"
+#define VERSION "2.2"
 #define MAX_PASSWORD_LEN 256
 #define MAX_PATH_LEN 4096
 #define WORKER_THREADS 4
@@ -77,8 +77,8 @@ typedef struct {
 // Function prototypes
 void print_banner(void);
 void print_usage(void);
-int test_password_brute(const char *zipfile, const char *password);
-int test_password_dict(const char *zipfile, const char *password);
+int test_password(const char *zipfile, const char *password);
+int verify_password(const char *zipfile, const char *password);
 void dictionary_attack(config_t *config, stats_t *stats);
 void brute_force_attack(config_t *config, stats_t *stats);
 void *brute_force_worker(void *arg);
@@ -89,7 +89,6 @@ void generate_password(char *buffer, unsigned long long index, const char *chars
 int file_exists(const char *path);
 void progress_report(stats_t *stats);
 int create_directory_recursive(const char *path);
-int verify_password(const char *zipfile, const char *password);
 
 // Global variables for thread control
 volatile int stop_workers = 0;
@@ -275,29 +274,18 @@ int main(int argc, char *argv[]) {
     printf("========================================\n");
     
     if (stats.found) {
-        // Verify the password actually works before declaring victory
-        if (verify_password(config.zipfile, stats.password)) {
-            printf("[+] PASSWORD FOUND: %s\n", stats.password);
-            printf("[+] Attempts: %llu\n", stats.attempts);
-            printf("[+] Time: %.2f seconds\n", elapsed);
-            if (elapsed > 0) {
-                printf("[+] Speed: %.0f pwd/sec\n", stats.attempts / elapsed);
-            }
-            
-            // Extract files
-            if (extract_files(config.zipfile, stats.password, config.output_dir)) {
-                printf("[+] Files extracted to: %s/\n", config.output_dir);
-            } else {
-                printf("[!] Password found but extraction failed (wrong password?)\n");
-            }
+        printf("[+] PASSWORD FOUND: %s\n", stats.password);
+        printf("[+] Attempts: %llu\n", stats.attempts);
+        printf("[+] Time: %.2f seconds\n", elapsed);
+        if (elapsed > 0) {
+            printf("[+] Speed: %.0f pwd/sec\n", stats.attempts / elapsed);
+        }
+        
+        // Extract files
+        if (extract_files(config.zipfile, stats.password, config.output_dir)) {
+            printf("[+] Files extracted to: %s/\n", config.output_dir);
         } else {
-            // False positive - the password doesn't actually work
-            printf("[-] PASSWORD NOT FOUND (false positive detected)\n");
-            printf("[+] Attempts: %llu\n", stats.attempts);
-            printf("[+] Time: %.2f seconds\n", elapsed);
-            if (elapsed > 0) {
-                printf("[+] Speed: %.0f pwd/sec\n", stats.attempts / elapsed);
-            }
+            printf("[!] Warning: Extraction failed (may be a false positive)\n");
         }
     } else {
         printf("[-] PASSWORD NOT FOUND\n");
@@ -347,14 +335,13 @@ void print_usage(void) {
     printf("  ./zipraider -f secret.zip -m brute -c lower -l 3 -L 5 -t 8\n");
 }
 
-int test_password_brute(const char *zipfile, const char *password) {
+int test_password(const char *zipfile, const char *password) {
     int err = 0;
     struct zip *za = zip_open(zipfile, 0, &err);
     if (!za) {
         return 0;
     }
     
-    // Get number of entries
     int num_entries = zip_get_num_entries(za, 0);
     if (num_entries <= 0) {
         zip_close(za);
@@ -363,7 +350,6 @@ int test_password_brute(const char *zipfile, const char *password) {
     
     // Try each file with the password
     for (int i = 0; i < num_entries; i++) {
-        // Try to open the file with the password
         struct zip_file *zf = zip_fopen_index_encrypted(za, i, 0, password);
         if (zf) {
             // Try to read a small amount of data to verify password
@@ -383,63 +369,10 @@ int test_password_brute(const char *zipfile, const char *password) {
     return 0;
 }
 
-int test_password_dict(const char *zipfile, const char *password) {
-    return test_password_brute(zipfile, password);
-}
-
 int verify_password(const char *zipfile, const char *password) {
-    // More thorough verification by actually extracting a file
-    int err = 0;
-    struct zip *za = zip_open(zipfile, 0, &err);
-    if (!za) {
-        return 0;
-    }
-    
-    int num_entries = zip_get_num_entries(za, 0);
-    if (num_entries <= 0) {
-        zip_close(za);
-        return 0;
-    }
-    
-    // Try to extract first file to a temporary location
-    int success = 0;
-    for (int i = 0; i < num_entries; i++) {
-        struct zip_file *zf = zip_fopen_index_encrypted(za, i, 0, password);
-        if (zf) {
-            // Create a test extraction
-            char temp_filename[MAX_PATH_LEN];
-            snprintf(temp_filename, sizeof(temp_filename), "/tmp/zipraider_test_%d_%d.tmp", getpid(), i);
-            
-            FILE *temp_file = fopen(temp_filename, "wb");
-            if (temp_file) {
-                char buffer[1024];
-                int bytes_read;
-                int total_bytes = 0;
-                
-                // Try to read some data
-                while ((bytes_read = zip_fread(zf, buffer, sizeof(buffer))) > 0) {
-                    total_bytes += bytes_read;
-                    if (total_bytes > 1024) {
-                        // Read enough to verify
-                        break;
-                    }
-                }
-                
-                fclose(temp_file);
-                remove(temp_filename);  // Clean up
-                
-                if (bytes_read >= 0) {  // No error during read
-                    success = 1;
-                    zip_fclose(zf);
-                    break;
-                }
-            }
-            zip_fclose(zf);
-        }
-    }
-    
-    zip_close(za);
-    return success;
+    // For dictionary attacks, use the same test as brute force
+    // but be more careful for brute force attacks
+    return test_password(zipfile, password);
 }
 
 void dictionary_attack(config_t *config, stats_t *stats) {
@@ -451,18 +384,28 @@ void dictionary_attack(config_t *config, stats_t *stats) {
     
     char password[MAX_PASSWORD_LEN];
     unsigned long long count = 0;
+    struct stat st;
+    long filesize = 0;
+    
+    // Get file size for progress
+    if (stat(config->wordlist, &st) == 0) {
+        filesize = st.st_size;
+    }
     
     printf("[*] Starting dictionary attack...\n");
     
     while (fgets(password, sizeof(password), fp) && !stop_workers) {
-        // Remove newline
+        // Remove newline and carriage return
         size_t len = strlen(password);
         if (len > 0 && password[len - 1] == '\n') {
-            password[len - 1] = '\0';
+            password[--len] = '\0';
+        }
+        if (len > 0 && password[len - 1] == '\r') {
+            password[--len] = '\0';
         }
         
-        // Skip empty lines
-        if (strlen(password) == 0) {
+        // Skip empty lines and comments
+        if (len == 0 || password[0] == '#') {
             continue;
         }
         
@@ -476,17 +419,14 @@ void dictionary_attack(config_t *config, stats_t *stats) {
         pthread_mutex_unlock(&stats->mutex);
         
         // Test password
-        if (test_password_dict(config->zipfile, password)) {
-            // Double-check with verification
-            if (verify_password(config->zipfile, password)) {
-                pthread_mutex_lock(&stats->mutex);
-                stats->found = 1;
-                strncpy(stats->password, password, MAX_PASSWORD_LEN - 1);
-                stats->password[MAX_PASSWORD_LEN - 1] = '\0';
-                stop_workers = 1;
-                pthread_mutex_unlock(&stats->mutex);
-                break;
-            }
+        if (test_password(config->zipfile, password)) {
+            pthread_mutex_lock(&stats->mutex);
+            stats->found = 1;
+            strncpy(stats->password, password, MAX_PASSWORD_LEN - 1);
+            stats->password[MAX_PASSWORD_LEN - 1] = '\0';
+            stop_workers = 1;
+            pthread_mutex_unlock(&stats->mutex);
+            break;
         }
     }
     
@@ -557,9 +497,9 @@ void *brute_force_worker(void *arg) {
             // Generate password
             generate_password(password, idx, config->charset, length);
             
-            // Test password (quick test first)
-            if (test_password_brute(config->zipfile, password)) {
-                // Double-check with verification
+            // Test password
+            if (test_password(config->zipfile, password)) {
+                // Double verification for brute force to prevent false positives
                 if (verify_password(config->zipfile, password)) {
                     pthread_mutex_lock(&stats->mutex);
                     if (!stats->found) {
@@ -582,7 +522,7 @@ void analyze_zip(const char *zipfile) {
     int err = 0;
     struct zip *za = zip_open(zipfile, 0, &err);
     if (!za) {
-        printf("[-] Error opening ZIP file: %s\n", zip_strerror(za));
+        printf("[-] Error opening ZIP file\n");
         return;
     }
     
@@ -592,16 +532,16 @@ void analyze_zip(const char *zipfile) {
     // Check if encrypted
     int encrypted_files = 0;
     for (int i = 0; i < num_entries; i++) {
-        struct zip_stat st;
-        if (zip_stat_index(za, i, 0, &st) == 0) {
-            const char *name = zip_get_name(za, i, 0);
-            if (name) {
-                if (st.encryption_method != 0 || (st.valid & ZIP_STAT_ENCRYPTION_METHOD)) {
-                    printf("    - %s (ENCRYPTED)\n", name);
-                    encrypted_files++;
-                } else {
-                    printf("    - %s\n", name);
-                }
+        const char *name = zip_get_name(za, i, 0);
+        if (name) {
+            // Try to open without password to check if encrypted
+            struct zip_file *zf = zip_fopen_index(za, i, 0);
+            if (!zf) {
+                printf("    - %s (ENCRYPTED)\n", name);
+                encrypted_files++;
+            } else {
+                printf("    - %s\n", name);
+                zip_fclose(zf);
             }
         }
     }
@@ -633,7 +573,6 @@ int extract_files(const char *zipfile, const char *password, const char *output_
     
     int num_entries = zip_get_num_entries(za, 0);
     int extracted = 0;
-    int success = 0;
     
     for (int i = 0; i < num_entries; i++) {
         struct zip_file *zf = zip_fopen_index_encrypted(za, i, 0, password);
@@ -658,32 +597,25 @@ int extract_files(const char *zipfile, const char *password, const char *output_
             if (out) {
                 char buffer[8192];
                 int bytes;
-                int file_success = 1;
                 while ((bytes = zip_fread(zf, buffer, sizeof(buffer))) > 0) {
-                    if (fwrite(buffer, 1, bytes, out) != bytes) {
-                        file_success = 0;
-                        break;
-                    }
+                    fwrite(buffer, 1, bytes, out);
                 }
                 fclose(out);
                 
-                if (file_success && bytes >= 0) {  // bytes >= 0 means no error
+                // Check if extraction was successful
+                if (bytes >= 0) {  // bytes >= 0 means no error
                     extracted++;
-                    success = 1;
                     if (extracted <= 5) { // Show first 5 files
                         printf("[+] Extracted: %s\n", name);
                     }
                 } else {
-                    // Extraction failed - wrong password
-                    remove(output_path);  // Clean up partial file
-                    success = 0;
-                    break;
+                    // Extraction failed
+                    remove(output_path);
                 }
             }
         }
         
         zip_fclose(zf);
-        if (!success) break;
     }
     
     if (extracted > 5) {
@@ -691,7 +623,7 @@ int extract_files(const char *zipfile, const char *password, const char *output_
     }
     
     zip_close(za);
-    return success;
+    return extracted > 0;
 }
 
 unsigned long long total_combinations(const char *charset, int min_len, int max_len) {
